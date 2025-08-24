@@ -18,12 +18,30 @@ export class CatanGameEngine {
     this.eventListeners = [];
   }
 
-  // Event System
+  // Event System with cleanup support
   addEventListener(eventType, callback) {
     if (!this.eventListeners[eventType]) {
       this.eventListeners[eventType] = [];
     }
     this.eventListeners[eventType].push(callback);
+    
+    // Return cleanup function
+    return () => {
+      this.removeEventListener(eventType, callback);
+    };
+  }
+  
+  removeEventListener(eventType, callback) {
+    if (!this.eventListeners[eventType]) return;
+    
+    const index = this.eventListeners[eventType].indexOf(callback);
+    if (index > -1) {
+      this.eventListeners[eventType].splice(index, 1);
+    }
+  }
+  
+  removeAllEventListeners() {
+    this.eventListeners = [];
   }
 
   emit(eventType, data) {
