@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎲 Catan Win Predictor - Phase 1 Fixed</title>
+    
+    <!-- Dependencies with fixed versions -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+    
+    <style>
+        .hex-tile {
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+        
+        .hex-tile:hover {
+            filter: brightness(1.1);
+            transform: scale(1.05);
+        }
+        
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-boundary {
+            background-color: #fee;
+            color: #c00;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="env,react">
+        // Phase 1 Fixed Version with Memory Leak Prevention
+        const { useState, useEffect, useRef, useCallback, useMemo } = React;
+        
+        // Constants
+        const RESOURCES = ["wood", "brick", "sheep", "wheat", "ore"];
+        const TOKENS = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+        const PLAYER_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f"];
+        const DICE_PROBABILITIES = {
+            2: 1/36, 3: 2/36, 4: 3/36, 5: 4/36, 6: 5/36,
+            8: 5/36, 9: 4/36, 10: 3/36, 11: 2/36, 12: 1/36
+        };
+
+        // Error Boundary Component
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { hasError: false, error: null };
+            }
+
+            static getDerivedStateFromError(error) {
+                return { hasError: true, error };
+            }
+
+            componentDidCatch(error, errorInfo) {
+                console.error('Error caught by boundary:', error, errorInfo);
+            }
+
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div className="error-boundary">
+                            <h2>Something went wrong!</h2>
+                            <p>{this.state.error?.message || 'Unknown error'}</p>
+                            <button 
+                                onClick={() => this.setState({ hasError: false, error: null })}
+                                className="bg-blue-500 text-white px-4 py-2 rounded mt-2"
+                            >
+                                Try Again
+                            </button>
+                        </div>
+                    );
+                }
+
+                return this.props.children;
+            }
+        }
+
+        // Input validation utilities
+        const validateResource = (resource) => {
+            return RESOURCES.includes(resource) ? resource : 'desert';
+        };
+
+        const validateToken = (token) => {
+            const num = parseInt(token);
+            return (num >= 2 && num <= 12 && num !== 7) ? num : null;
+        };
+
+        const sanitizeInput = (input) => {
+            return String(input).replace(/[^a-zA-Z0-9\s]/g, '');
+        };
+
+        // Fixed Chart Component with proper cleanup
+        const WinRateChart = React.memo(({ results }) => {
+            const canvasRef = useRef(null);
+            const chartInstanceRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current || !results) return;
+
+                // Destroy existing chart instance
+                if (chartInstanceRef.current) {
+                    chartInstanceRef.current.destroy();
+                    chartInstanceRef.current = null;
+                }
+
+                const ctx = canvasRef.current.getContext('2d');
+                
+                // Create new chart
+                chartInstanceRef.current = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: results.playerStats.map(p => `Player ${p.playerId + 1}`),
+                        datasets: [{
+                            label: 'Win Percentage',
+                            data: results.playerStats.map(p => p.winPercentage),
+                            backgroundColor: PLAYER_COLORS,
+                            borderColor: PLAYER_COLORS.map(c => c + 'cc'),
+                            borderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'Win Rate by Player'
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: (context) => `${context.parsed.y.toFixed(1)}%`
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                max: 100,
+                                ticks: {
+                                    callback: (value) => value + '%'
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Cleanup function
+                return () => {
+                    if (chartInstanceRef.current) {
+                        chartInstanceRef.current.destroy();
+                        chartInstanceRef.current = null;
+                    }
+                };
+            }, [results]);
+
+            return (
+                <div className="h-64">
+                    <canvas ref={canvasRef}></canvas>
+                </div>
+            );
+        });
+
+        // Hex Tile Component with validation
+        const HexTile = React.memo(({ tile, index, onUpdate }) => {
+            const [isEditing, setIsEditing] = useState(false);
+            const [tempResource, setTempResource] = useState(tile.resource);
+            const [tempToken, setTempToken] = useState(tile.token);
+
+            const handleSave = useCallback(() => {
+                const validResource = validateResource(tempResource);
+                const validToken = validateToken(tempToken);
+                
+                onUpdate(index, {
+                    resource: validResource,
+                    token: validToken
+                });
+                setIsEditing(false);
+            }, [tempResource, tempToken, index, onUpdate]);
+
+            const handleCancel = useCallback(() => {
+                setTempResource(tile.resource);
+                setTempToken(tile.token);
+                setIsEditing(false);
+            }, [tile]);
+
+            const getResourceColor = useMemo(() => {
+                const colors = {
+                    wood: '#8B4513',
+                    brick: '#B22222',
+                    sheep: '#90EE90',
+                    wheat: '#FFD700',
+                    ore: '#696969',
+                    desert: '#F4A460'
+                };
+                return colors[tile.resource] || '#ccc';
+            }, [tile.resource]);
+
+            if (isEditing) {
+                return (
+                    <div className="hex-tile bg-white rounded-lg p-4 shadow-lg">
+                        <select 
+                            value={tempResource} 
+                            onChange={(e) => setTempResource(e.target.value)}
+                            className="w-full mb-2 p-1 border rounded"
+                        >
+                            <option value="desert">Desert</option>
+                            {RESOURCES.map(r => (
+                                <option key={r} value={r}>{r}</option>
+                            ))}
+                        </select>
+                        
+                        {tempResource !== 'desert' && (
+                            <input 
+                                type="number" 
+                                min="2" 
+                                max="12" 
+                                value={tempToken || ''} 
+                                onChange={(e) => setTempToken(e.target.value)}
+                                className="w-full mb-2 p-1 border rounded"
+                                placeholder="Token (2-12, not 7)"
+                            />
+                        )}
+                        
+                        <div className="flex gap-2">
+                            <button 
+                                onClick={handleSave}
+                                className="flex-1 bg-green-500 text-white px-2 py-1 rounded text-sm"
+                            >
+                                Save
+                            </button>
+                            <button 
+                                onClick={handleCancel}
+                                className="flex-1 bg-red-500 text-white px-2 py-1 rounded text-sm"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div 
+                    className="hex-tile rounded-lg p-4 text-center cursor-pointer shadow-md"
+                    style={{ backgroundColor: getResourceColor }}
+                    onClick={() => setIsEditing(true)}
+                >
+                    <div className="font-bold text-white text-shadow">
+                        {tile.resource}
+                    </div>
+                    {tile.token && (
+                        <div className="text-2xl font-bold text-white mt-2">
+                            {tile.token}
+                        </div>
+                    )}
+                </div>
+            );
+        });
+
+        // Simplified Simulation System with proper cleanup
+        class PredictionSimulator {
+            constructor() {
+                this.abortController = null;
+            }
+
+            async runSimulation(boardSetup, numSimulations, onProgress) {
+                // Cancel any existing simulation
+                this.cancel();
+                
+                this.abortController = new AbortController();
+                const signal = this.abortController.signal;
+
+                const results = {
+                    wins: [0, 0, 0, 0],
+                    totalGames: numSimulations,
+                    playerStats: Array(4).fill(null).map((_, i) => ({
+                        playerId: i,
+                        wins: 0,
+                        winPercentage: 0,
+                        averageVP: 0,
+                        averageResources: 0
+                    }))
+                };
+
+                try {
+                    for (let i = 0; i < numSimulations; i++) {
+                        if (signal.aborted) break;
+
+                        // Simulate one game
+                        const gameResult = this.simulateGame(boardSetup);
+                        results.wins[gameResult.winner]++;
+
+                        // Update progress every 50 simulations
+                        if (i % 50 === 0) {
+                            onProgress(i + 1, numSimulations);
+                            // Allow UI to update
+                            await new Promise(resolve => setTimeout(resolve, 0));
+                        }
+                    }
+
+                    // Calculate final statistics
+                    results.playerStats.forEach((stats, playerId) => {
+                        stats.wins = results.wins[playerId];
+                        stats.winPercentage = (results.wins[playerId] / numSimulations) * 100;
+                    });
+
+                    return results;
+                } catch (error) {
+                    if (error.name === 'AbortError') {
+                        console.log('Simulation cancelled');
+                        return null;
+                    }
+                    throw error;
+                }
+            }
+
+            simulateGame(boardSetup) {
+                // Simplified game simulation based on resource production
+                const playerScores = [0, 0, 0, 0];
+                
+                // Calculate production values for each player based on starting positions
+                boardSetup.tiles.forEach((tile, index) => {
+                    if (tile.resource !== 'desert' && tile.token) {
+                        const probability = DICE_PROBABILITIES[tile.token] || 0;
+                        const resourceValue = this.getResourceValue(tile.resource);
+                        const tileScore = probability * resourceValue * 100;
+                        
+                        // Simulate player control of this tile
+                        const controllingPlayer = Math.floor(Math.random() * 4);
+                        playerScores[controllingPlayer] += tileScore;
+                    }
+                });
+
+                // Add randomness to simulate game dynamics
+                playerScores.forEach((score, i) => {
+                    playerScores[i] += Math.random() * 20;
+                });
+
+                // Find winner
+                const winner = playerScores.indexOf(Math.max(...playerScores));
+                
+                return { winner, scores: playerScores };
+            }
+
+            getResourceValue(resource) {
+                const values = {
+                    wood: 1.0,
+                    brick: 1.0,
+                    sheep: 0.8,
+                    wheat: 1.2,
+                    ore: 1.3
+                };
+                return values[resource] || 1.0;
+            }
+
+            cancel() {
+                if (this.abortController) {
+                    this.abortController.abort();
+                    this.abortController = null;
+                }
+            }
+        }
+
+        // Main App Component
+        const CatanPredictor = () => {
+            const [boardSetup, setBoardSetup] = useState(() => {
+                // Initialize board with proper resource distribution
+                const resources = [...RESOURCES, ...RESOURCES, ...RESOURCES, 'desert', 'wood', 'brick', 'sheep', 'wheat'];
+                const shuffledResources = [...resources].sort(() => Math.random() - 0.5);
+                const shuffledTokens = [...TOKENS].sort(() => Math.random() - 0.5);
+                
+                return {
+                    tiles: shuffledResources.map((resource, i) => ({
+                        resource,
+                        token: resource === 'desert' ? null : shuffledTokens.pop()
+                    }))
+                };
+            });
+
+            const [simulationCount, setSimulationCount] = useState(1000);
+            const [isRunning, setIsRunning] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [results, setResults] = useState(null);
+            const [error, setError] = useState(null);
+
+            const simulatorRef = useRef(new PredictionSimulator());
+
+            // Cleanup on unmount
+            useEffect(() => {
+                return () => {
+                    simulatorRef.current.cancel();
+                };
+            }, []);
+
+            const handleTileUpdate = useCallback((index, updates) => {
+                setBoardSetup(prev => ({
+                    ...prev,
+                    tiles: prev.tiles.map((tile, i) => 
+                        i === index ? { ...tile, ...updates } : tile
+                    )
+                }));
+            }, []);
+
+            const runPrediction = useCallback(async () => {
+                setIsRunning(true);
+                setError(null);
+                setProgress(0);
+                
+                try {
+                    const result = await simulatorRef.current.runSimulation(
+                        boardSetup,
+                        simulationCount,
+                        (current, total) => {
+                            setProgress(Math.round((current / total) * 100));
+                        }
+                    );
+                    
+                    if (result) {
+                        setResults(result);
+                    }
+                } catch (err) {
+                    setError(err.message || 'Simulation failed');
+                    console.error('Simulation error:', err);
+                } finally {
+                    setIsRunning(false);
+                    setProgress(0);
+                }
+            }, [boardSetup, simulationCount]);
+
+            const stopSimulation = useCallback(() => {
+                simulatorRef.current.cancel();
+                setIsRunning(false);
+                setProgress(0);
+            }, []);
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-4">
+                    <div className="max-w-7xl mx-auto">
+                        <h1 className="text-4xl font-bold text-center mb-8 text-gray-800">
+                            🎲 Catan Win Predictor - Phase 1
+                        </h1>
+
+                        {/* Board Setup */}
+                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <h2 className="text-2xl font-bold mb-4">Board Setup</h2>
+                            <div className="grid grid-cols-5 gap-2">
+                                {boardSetup.tiles.map((tile, index) => (
+                                    <HexTile 
+                                        key={index}
+                                        tile={tile}
+                                        index={index}
+                                        onUpdate={handleTileUpdate}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Controls */}
+                        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                            <h2 className="text-2xl font-bold mb-4">Simulation Settings</h2>
+                            
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium mb-2">
+                                    Number of Simulations: {simulationCount}
+                                </label>
+                                <input 
+                                    type="range"
+                                    min="100"
+                                    max="5000"
+                                    step="100"
+                                    value={simulationCount}
+                                    onChange={(e) => setSimulationCount(Number(e.target.value))}
+                                    className="w-full"
+                                    disabled={isRunning}
+                                />
+                            </div>
+
+                            {error && (
+                                <div className="bg-red-100 text-red-700 p-3 rounded mb-4">
+                                    Error: {error}
+                                </div>
+                            )}
+
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={runPrediction}
+                                    disabled={isRunning}
+                                    className={`flex-1 py-3 px-6 rounded font-bold transition-colors ${
+                                        isRunning 
+                                            ? 'bg-gray-400 cursor-not-allowed' 
+                                            : 'bg-blue-500 hover:bg-blue-600 text-white'
+                                    }`}
+                                >
+                                    {isRunning ? 'Running...' : 'Run Prediction'}
+                                </button>
+                                
+                                {isRunning && (
+                                    <button
+                                        onClick={stopSimulation}
+                                        className="py-3 px-6 rounded font-bold bg-red-500 hover:bg-red-600 text-white"
+                                    >
+                                        Stop
+                                    </button>
+                                )}
+                            </div>
+
+                            {isRunning && (
+                                <div className="mt-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span>Progress: {progress}%</span>
+                                        <div className="loading-spinner"></div>
+                                    </div>
+                                    <div className="w-full bg-gray-200 rounded-full h-4">
+                                        <div 
+                                            className="bg-blue-500 h-4 rounded-full transition-all duration-300"
+                                            style={{ width: `${progress}%` }}
+                                        ></div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Results */}
+                        {results && !isRunning && (
+                            <div className="bg-white rounded-lg shadow-lg p-6">
+                                <h2 className="text-2xl font-bold mb-4">Prediction Results</h2>
+                                
+                                <div className="mb-6">
+                                    <WinRateChart results={results} />
+                                </div>
+
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {results.playerStats.map((player, index) => (
+                                        <div 
+                                            key={index}
+                                            className="bg-gray-50 rounded p-4 text-center"
+                                            style={{ borderTop: `4px solid ${PLAYER_COLORS[index]}` }}
+                                        >
+                                            <h3 className="font-bold mb-2">Player {index + 1}</h3>
+                                            <p className="text-2xl font-bold">{player.winPercentage.toFixed(1)}%</p>
+                                            <p className="text-sm text-gray-600">{player.wins} wins</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // Render app with error boundary
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(
+            <ErrorBoundary>
+                <CatanPredictor />
+            </ErrorBoundary>
+        );
+    </script>
+</body>
+</html>
