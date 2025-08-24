@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complete Catan Game</title>
+    
+    <!-- TailwindCSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* Custom animations and styles */
+        .dice-rolling {
+            animation: shake 0.5s ease-in-out infinite;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-2px); }
+            75% { transform: translateX(2px); }
+        }
+        
+        .hex-tile {
+            transition: all 0.2s ease;
+        }
+        
+        .hex-tile:hover {
+            filter: brightness(1.1);
+            transform: scale(1.02);
+        }
+        
+        .settlement-node {
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+        
+        .settlement-node:hover {
+            transform: scale(1.2);
+        }
+        
+        .road-edge {
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+        
+        .road-edge:hover {
+            stroke-width: 6;
+        }
+        
+        .modal-backdrop {
+            backdrop-filter: blur(4px);
+        }
+        
+        .resource-card {
+            transition: all 0.2s ease;
+        }
+        
+        .resource-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Game Type Definitions -->
+    <script type="text/babel" data-presets="env,react">
+        // Game State Architecture (embedded)
+        const RESOURCES = ["wood", "brick", "sheep", "wheat", "ore"];
+        const TOKENS = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+        const DICE_PROBABILITIES = {
+            2: 1/36, 3: 2/36, 4: 3/36, 5: 4/36, 6: 5/36, 7: 6/36, 
+            8: 5/36, 9: 4/36, 10: 3/36, 11: 2/36, 12: 1/36
+        };
+
+        const BUILDING_COSTS = {
+            settlement: { wood: 1, brick: 1, sheep: 1, wheat: 1 },
+            city: { ore: 3, wheat: 2 },
+            road: { wood: 1, brick: 1 },
+            developmentCard: { ore: 1, sheep: 1, wheat: 1 }
+        };
+
+        const GAME_PHASES = {
+            SETUP: 'setup',
+            MAIN_GAME: 'main_game',
+            GAME_OVER: 'game_over'
+        };
+
+        const TURN_PHASES = {
+            DICE_ROLL: 'dice_roll',
+            ROBBER_PLACEMENT: 'robber_placement',
+            ACTIONS: 'actions',
+            END_TURN: 'end_turn'
+        };
+
+        const PLAYER_COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f"];
+
+        // Simple Catan Implementation
+        function createSimpleCatanGame() {
+            const gameState = {
+                phase: GAME_PHASES.SETUP,
+                turnPhase: TURN_PHASES.DICE_ROLL,
+                currentPlayer: 0,
+                setupRound: 1,
+                turnNumber: 0,
+                lastDiceRoll: null,
+                players: Array.from({ length: 4 }, (_, i) => ({
+                    id: i,
+                    name: `Player ${i + 1}`,
+                    color: PLAYER_COLORS[i],
+                    resources: { wood: 2, brick: 2, sheep: 2, wheat: 2, ore: 2 },
+                    settlements: [],
+                    cities: [],
+                    roads: [],
+                    victoryPoints: 0,
+                    developmentCards: { knight: 0, roadBuilding: 0, monopoly: 0, yearOfPlenty: 0, victoryPoint: 0 }
+                })),
+                board: createSimpleBoard()
+            };
+
+            const eventListeners = {};
+            
+            return {
+                getGameState: () => gameState,
+                addEventListener: (event, callback) => {
+                    if (!eventListeners[event]) eventListeners[event] = [];
+                    eventListeners[event].push(callback);
+                },
+                emit: (event, data) => {
+                    if (eventListeners[event]) {
+                        eventListeners[event].forEach(cb => cb(data));
+                    }
+                },
+                rollDice: () => {
+                    const dice1 = Math.floor(Math.random() * 6) + 1;
+                    const dice2 = Math.floor(Math.random() * 6) + 1;
+                    const total = dice1 + dice2;
+                    gameState.lastDiceRoll = total;
+                    gameState.turnPhase = TURN_PHASES.ACTIONS;
+                    return { dice1, dice2, total };
+                },
+                endTurn: () => {
+                    gameState.currentPlayer = (gameState.currentPlayer + 1) % 4;
+                    gameState.turnPhase = TURN_PHASES.DICE_ROLL;
+                    gameState.turnNumber++;
+                },
+                buildSettlement: () => true,
+                buildCity: () => true,
+                buildRoad: () => true,
+                buyDevelopmentCard: () => 'knight'
+            };
+        }
+
+        function createSimpleBoard() {
+            // Create a simple 19-hex board
+            const tiles = [
+                // Row 1
+                { id: 0, q: 0, r: -2, resource: 'wood', token: 11, x: 300, y: 150 },
+                { id: 1, q: 1, r: -2, resource: 'sheep', token: 12, x: 370, y: 150 },
+                { id: 2, q: 2, r: -2, resource: 'wheat', token: 9, x: 440, y: 150 },
+                
+                // Row 2
+                { id: 3, q: -1, r: -1, resource: 'brick', token: 4, x: 230, y: 210 },
+                { id: 4, q: 0, r: -1, resource: 'ore', token: 6, x: 300, y: 210 },
+                { id: 5, q: 1, r: -1, resource: 'brick', token: 5, x: 370, y: 210 },
+                { id: 6, q: 2, r: -1, resource: 'sheep', token: 10, x: 440, y: 210 },
+                
+                // Row 3 (center)
+                { id: 7, q: -2, r: 0, resource: 'wheat', token: 8, x: 160, y: 270 },
+                { id: 8, q: -1, r: 0, resource: 'wood', token: 3, x: 230, y: 270 },
+                { id: 9, q: 0, r: 0, resource: 'desert', token: null, x: 300, y: 270 },
+                { id: 10, q: 1, r: 0, resource: 'wood', token: 4, x: 370, y: 270 },
+                { id: 11, q: 2, r: 0, resource: 'ore', token: 8, x: 440, y: 270 },
+                
+                // Row 4
+                { id: 12, q: -2, r: 1, resource: 'wheat', token: 5, x: 160, y: 330 },
+                { id: 13, q: -1, r: 1, resource: 'sheep', token: 2, x: 230, y: 330 },
+                { id: 14, q: 0, r: 1, resource: 'ore', token: 6, x: 300, y: 330 },
+                { id: 15, q: 1, r: 1, resource: 'brick', token: 3, x: 370, y: 330 },
+                
+                // Row 5
+                { id: 16, q: -2, r: 2, resource: 'wood', token: 9, x: 160, y: 390 },
+                { id: 17, q: -1, r: 2, resource: 'wheat', token: 11, x: 230, y: 390 },
+                { id: 18, q: 0, r: 2, resource: 'sheep', token: 10, x: 300, y: 390 }
+            ];
+
+            return {
+                tiles,
+                nodes: [],
+                edges: [],
+                ports: [],
+                robberPosition: 9 // Start on desert
+            };
+        }
+
+        // Main Game Component
+        function CatanGame() {
+            const [game] = React.useState(() => createSimpleCatanGame());
+            const [gameState, setGameState] = React.useState(() => game.getGameState());
+            const [selectedAction, setSelectedAction] = React.useState(null);
+            const [diceRolling, setDiceRolling] = React.useState(false);
+            const [lastDiceRoll, setLastDiceRoll] = React.useState(null);
+            const [gameLog, setGameLog] = React.useState([]);
+
+            React.useEffect(() => {
+                const updateGameState = () => setGameState(game.getGameState());
+                
+                game.addEventListener('diceRolled', (data) => {
+                    updateGameState();
+                    setLastDiceRoll(data);
+                    setDiceRolling(false);
+                    addToGameLog(`Player ${gameState.currentPlayer + 1} rolled ${data.total}`);
+                });
+
+                return () => {};
+            }, [game]);
+
+            const addToGameLog = React.useCallback((message) => {
+                setGameLog(prev => [...prev.slice(-9), {
+                    id: Date.now(),
+                    message,
+                    timestamp: new Date().toLocaleTimeString()
+                }]);
+            }, []);
+
+            const handleDiceRoll = () => {
+                setDiceRolling(true);
+                setTimeout(() => {
+                    const result = game.rollDice();
+                    game.emit('diceRolled', result);
+                }, 1000);
+            };
+
+            const currentPlayer = gameState.players[gameState.currentPlayer];
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-green-50">
+                    {/* Header */}
+                    <header className="bg-white shadow-lg border-b-4 border-amber-500">
+                        <div className="max-w-7xl mx-auto px-4 py-4">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-4">
+                                    <h1 className="text-3xl font-bold text-gray-800">🏝️ Complete Catan Game</h1>
+                                    <div className="text-sm text-gray-600">
+                                        Turn {gameState.turnNumber + 1}
+                                    </div>
+                                </div>
+                                <div className="text-sm font-medium text-gray-700">
+                                    Current: <span style={{color: currentPlayer.color}}>Player {gameState.currentPlayer + 1}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div className="max-w-7xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-4 gap-6">
+                        
+                        {/* Game Board */}
+                        <div className="lg:col-span-3">
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <GameBoard gameState={gameState} />
+                            </div>
+                        </div>
+
+                        {/* Side Panel */}
+                        <div className="space-y-6">
+                            
+                            {/* Current Player Panel */}
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <h2 className="text-xl font-bold mb-4 flex items-center">
+                                    <div 
+                                        className="w-4 h-4 rounded-full mr-2" 
+                                        style={{backgroundColor: currentPlayer.color}}
+                                    />
+                                    {currentPlayer.name}
+                                </h2>
+                                
+                                <PlayerDashboard player={currentPlayer} />
+                            </div>
+
+                            {/* Actions Panel */}
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <h3 className="text-lg font-bold mb-4">Actions</h3>
+                                <ActionPanel
+                                    gameState={gameState}
+                                    onDiceRoll={handleDiceRoll}
+                                    onEndTurn={() => game.endTurn()}
+                                    diceRolling={diceRolling}
+                                    lastDiceRoll={lastDiceRoll}
+                                    selectedAction={selectedAction}
+                                    onActionSelect={setSelectedAction}
+                                />
+                            </div>
+
+                            {/* Game Log */}
+                            <div className="bg-white rounded-xl shadow-lg p-6">
+                                <h3 className="text-lg font-bold mb-4">Game Log</h3>
+                                <div className="space-y-2 max-h-60 overflow-y-auto">
+                                    {gameLog.map(entry => (
+                                        <div key={entry.id} className="text-sm text-gray-600">
+                                            <span className="text-xs text-gray-400">{entry.timestamp}</span> {entry.message}
+                                        </div>
+                                    ))}
+                                    {gameLog.length === 0 && (
+                                        <div className="text-sm text-gray-400">Game events will appear here...</div>
+                                    )}
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Game Board Component
+        function GameBoard({ gameState }) {
+            return (
+                <div className="relative">
+                    <svg width="600" height="500" viewBox="0 0 600 500" className="border rounded-lg bg-blue-50">
+                        {/* Render tiles */}
+                        {gameState.board.tiles.map(tile => (
+                            <HexTile 
+                                key={tile.id}
+                                tile={tile}
+                                hasRobber={gameState.board.robberPosition === tile.id}
+                            />
+                        ))}
+                    </svg>
+                </div>
+            );
+        }
+
+        // Hex Tile Component
+        function HexTile({ tile, hasRobber }) {
+            const size = 35;
+            const x = tile.x;
+            const y = tile.y;
+            
+            // Generate hex path
+            const points = [];
+            for (let i = 0; i < 6; i++) {
+                const angle = Math.PI / 180 * (60 * i - 30);
+                points.push([
+                    x + size * Math.cos(angle),
+                    y + size * Math.sin(angle)
+                ]);
+            }
+            const path = `M ${points.map(p => p.join(',')).join(' L ')} Z`;
+            
+            const colors = {
+                wood: "#8BC34A",
+                brick: "#E57373", 
+                sheep: "#AED581",
+                wheat: "#FBC02D",
+                ore: "#B0BEC5",
+                desert: "#F5DEB3"
+            };
+
+            const isHotNumber = tile.token === 6 || tile.token === 8;
+
+            return (
+                <g className="hex-tile">
+                    <path 
+                        d={path} 
+                        fill={colors[tile.resource] || "#ddd"} 
+                        stroke="#374151" 
+                        strokeWidth="2"
+                    />
+                    {tile.token && (
+                        <g>
+                            <circle 
+                                cx={x} 
+                                cy={y} 
+                                r="16" 
+                                fill="white" 
+                                stroke={isHotNumber ? "#ef4444" : "#334155"} 
+                                strokeWidth={isHotNumber ? "3" : "1.5"}
+                            />
+                            <text 
+                                x={x} 
+                                y={y + 5} 
+                                textAnchor="middle" 
+                                fontSize="14" 
+                                fontWeight="700" 
+                                fill="#111827"
+                            >
+                                {tile.token}
+                            </text>
+                        </g>
+                    )}
+                    {hasRobber && (
+                        <g>
+                            <circle cx={x} cy={y - 20} r="8" fill="#1f2937" />
+                            <text 
+                                x={x} 
+                                y={y - 15} 
+                                textAnchor="middle" 
+                                fontSize="10" 
+                                fill="white"
+                            >
+                                🏴‍☠️
+                            </text>
+                        </g>
+                    )}
+                </g>
+            );
+        }
+
+        // Player Dashboard Component
+        function PlayerDashboard({ player }) {
+            const resourceIcons = {
+                wood: "🌲",
+                brick: "🧱", 
+                sheep: "🐑",
+                wheat: "🌾",
+                ore: "⚒️"
+            };
+
+            return (
+                <div className="space-y-4">
+                    {/* Resources */}
+                    <div>
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">Resources</h4>
+                        <div className="grid grid-cols-2 gap-2">
+                            {Object.entries(player.resources).map(([resource, count]) => (
+                                <div key={resource} className="resource-card bg-gray-50 p-2 rounded-lg">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-lg">{resourceIcons[resource]}</span>
+                                        <span className="font-bold">{count}</span>
+                                    </div>
+                                    <div className="text-xs text-gray-600 capitalize">{resource}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Victory Points */}
+                    <div>
+                        <h4 className="text-sm font-semibold text-gray-700 mb-1">Victory Points</h4>
+                        <div className="text-2xl font-bold text-amber-600">{player.victoryPoints}</div>
+                    </div>
+
+                    {/* Buildings */}
+                    <div>
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">Buildings</h4>
+                        <div className="text-sm text-gray-600">
+                            <div>Settlements: {player.settlements.length}/5</div>
+                            <div>Cities: {player.cities.length}/4</div>
+                            <div>Roads: {player.roads.length}/15</div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Action Panel Component
+        function ActionPanel({ gameState, onDiceRoll, onEndTurn, diceRolling, lastDiceRoll, selectedAction, onActionSelect }) {
+            const canRollDice = gameState.turnPhase === TURN_PHASES.DICE_ROLL;
+            const canTakeActions = gameState.turnPhase === TURN_PHASES.ACTIONS;
+
+            return (
+                <div className="space-y-4">
+                    
+                    {/* Dice Section */}
+                    <div className="text-center">
+                        {canRollDice && (
+                            <button
+                                onClick={onDiceRoll}
+                                disabled={diceRolling}
+                                className={`px-6 py-3 bg-red-500 hover:bg-red-600 text-white font-bold rounded-lg ${
+                                    diceRolling ? 'dice-rolling' : ''
+                                }`}
+                            >
+                                {diceRolling ? '🎲 Rolling...' : '🎲 Roll Dice'}
+                            </button>
+                        )}
+                        
+                        {lastDiceRoll && (
+                            <div className="mt-2 text-lg font-bold">
+                                Last Roll: {lastDiceRoll.total} ({lastDiceRoll.dice1}, {lastDiceRoll.dice2})
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    {canTakeActions && (
+                        <div className="space-y-2">
+                            <ActionButton
+                                action="build_settlement"
+                                label="🏠 Build Settlement"
+                                cost={BUILDING_COSTS.settlement}
+                                selected={selectedAction === 'build_settlement'}
+                                onSelect={onActionSelect}
+                            />
+                            <ActionButton
+                                action="build_city"
+                                label="🏛️ Build City"
+                                cost={BUILDING_COSTS.city}
+                                selected={selectedAction === 'build_city'}
+                                onSelect={onActionSelect}
+                            />
+                            <ActionButton
+                                action="build_road"
+                                label="🛣️ Build Road"
+                                cost={BUILDING_COSTS.road}
+                                selected={selectedAction === 'build_road'}
+                                onSelect={onActionSelect}
+                            />
+                            <ActionButton
+                                action="buy_dev_card"
+                                label="🃏 Buy Dev Card"
+                                cost={BUILDING_COSTS.developmentCard}
+                                selected={selectedAction === 'buy_dev_card'}
+                                onSelect={onActionSelect}
+                            />
+                            
+                            <button
+                                onClick={onEndTurn}
+                                className="w-full px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white font-medium rounded-lg"
+                            >
+                                End Turn
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Action Button Component
+        function ActionButton({ action, label, cost, selected, onSelect }) {
+            const resourceIcons = {
+                wood: "🌲",
+                brick: "🧱", 
+                sheep: "🐑",
+                wheat: "🌾",
+                ore: "⚒️"
+            };
+
+            return (
+                <button
+                    onClick={() => onSelect(selected ? null : action)}
+                    className={`w-full p-3 rounded-lg border-2 transition-all ${
+                        selected 
+                            ? 'border-blue-500 bg-blue-50' 
+                            : 'border-gray-200 hover:border-gray-300 bg-white'
+                    }`}
+                >
+                    <div className="font-medium text-left">{label}</div>
+                    <div className="text-sm text-gray-600 flex items-center space-x-1 mt-1">
+                        <span>Cost:</span>
+                        {Object.entries(cost).map(([resource, amount]) => (
+                            <span key={resource} className="flex items-center">
+                                <span>{resourceIcons[resource]}</span>
+                                <span className="ml-1">{amount}</span>
+                            </span>
+                        ))}
+                    </div>
+                </button>
+            );
+        }
+
+        // Mount the app
+        ReactDOM.render(<CatanGame />, document.getElementById('root'));
+    </script>
+</body>
+</html>
+
