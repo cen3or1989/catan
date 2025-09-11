@@ -1526,3 +1526,183 @@ if __name__ == "__main__":
             elo_diff = 400 * math.log10(wins[0] / wins[1])
             print(f"  Approx Elo diff P0-P1: {elo_diff:.1f}")
 
+
+# ============= SUPER BOT ADDITION =============
+# Super Bot: یک AI تهاجمی که برای برد هر کاری می‌کند
+
+class SuperBot(HeuristicBot):
+    """Ultra-aggressive bot that plays to win at any cost"""
+    
+    def __init__(self, player_id: int, name: str = "SuperBot"):
+        super().__init__(player_id, name)
+        self.aggression_level = 1.0
+        self.risk_tolerance = 0.8
+    
+    def turn_actions(self, game, player, others):
+        """Execute aggressive turn strategy with better leader targeting"""
+        
+        # 1. Check for winning moves first
+        if self._check_winning_move(game, player):
+            return super().turn_actions(game, player, others)
+        
+        # 2. Identify and target the leader
+        leader = self._identify_leader(others)
+        if leader and leader.vp >= game.target_vp - 2:
+            self.aggressive_mode = True
+        
+        # 3. Execute base strategy with aggression
+        result = super().turn_actions(game, player, others)
+        
+        # 4. Additional aggressive actions
+        self._aggressive_trades(game, player, others)
+        self._block_leader(game, player, leader, others)
+        
+        return result
+    
+    def _identify_leader(self, others):
+        """Identify current leader including hidden VP estimate"""
+        if not others:
+            return None
+        return max(others, key=lambda p: (
+            p.vp + p.hidden_vp + int(sum(p.dev_hand.values()) * 0.2),
+            sum(p.hand.values())
+        ))
+    
+    def _check_winning_move(self, game, player):
+        """Check if we can win this turn"""
+        target_vp = game.target_vp
+        current_vp = player.vp + player.hidden_vp
+        
+        # Can we win with a city?
+        if player.settlements and current_vp + 1 >= target_vp:
+            if can_afford(player.hand, BUILD_COST["city"]):
+                return True
+        
+        # Can we win with a settlement?
+        if current_vp + 1 >= target_vp:
+            spots = game.legal_settlement_spots(player, [], True)
+            if spots and can_afford(player.hand, BUILD_COST["settlement"]):
+                return True
+        
+        return False
+    
+    def choose_robber_target_hex(self, game, player, others):
+        """Aggressively target the leader with robber - ALWAYS"""
+        
+        leader = self._identify_leader(others)
+        if not leader:
+            return super().choose_robber_target_hex(game, player, others)
+        
+        # If leader is close to winning, ALWAYS target them
+        if leader.vp >= game.target_vp - 2:
+            best_hex = None
+            max_damage = -1
+            
+            for hid, h in game.board.hexes.items():
+                if hid == game.board.robber_hex or h.number is None:
+                    continue
+                
+                damage = 0
+                leader_presence = False
+                
+                for nid in h.nodes:
+                    if nid in leader.cities:
+                        damage += 2 * DICE_WEIGHTS.get(h.number, 0)
+                        leader_presence = True
+                    elif nid in leader.settlements:
+                        damage += DICE_WEIGHTS.get(h.number, 0)
+                        leader_presence = True
+                
+                # Prioritize 6 and 8 heavily
+                if h.number in [6, 8] and leader_presence:
+                    damage *= 2.0  # Double weight for best numbers
+                
+                if damage > max_damage:
+                    max_damage = damage
+                    best_hex = hid
+            
+            if best_hex:
+                return best_hex
+        
+        # Otherwise use parent strategy but with more weight on leader
+        return super().choose_robber_target_hex(game, player, others)
+    
+    def _aggressive_trades(self, game, player, others):
+        """Make aggressive trades to catch up"""
+        leader = self._identify_leader(others)
+        if leader and player.vp < leader.vp - 2:
+            # Accept worse trade rates when desperate
+            for other in others:
+                if other.id != leader.id:
+                    # Try to trade even at bad rates
+                    game.p2p_trade(player, other)
+    
+    def _block_leader(self, game, player, leader, others):
+        """Try to block leader's expansion"""
+        if not leader or leader.vp < game.target_vp - 2:
+            return
+        
+        # Find leader's likely settlement spots
+        leader_spots = game.legal_settlement_spots(leader, others, True)
+        our_spots = game.legal_settlement_spots(player, others, True)
+        
+        # Find overlap - spots we can both build
+        blocking_spots = set(leader_spots) & set(our_spots)
+        
+        if blocking_spots and can_afford(player.hand, BUILD_COST["settlement"]):
+            # Prioritize blocking over our own best spot
+            best_block = max(blocking_spots, key=lambda n: game.node_expectation(n))
+            # This will be built in the normal turn_actions
+            self.priority_settlement = best_block
+    
+    def best_trade_to_target(self, game, player, target_cost):
+        """More aggressive trading - accept worse rates when desperate"""
+        need = Counter({r:max(0, c - player.hand[r]) for r,c in target_cost.items()})
+        if sum(need.values()) == 0:
+            return False
+        
+        # Try up to 3 trades (more aggressive than base bot)
+        for _ in range(3):
+            wants = [r for r,c in need.items() for _ in range(c)]
+            if not wants:
+                break
+            want = wants[0]
+            
+            best_give = None
+            best_score = -1
+            best_rate = None
+            
+            for r,c in list(player.hand.items()):
+                if r == want:
+                    continue
+                rate = game.best_trade_rate(player, r)
+                
+                # SUPER BOT: Accept even 4:1 trades if desperate
+                if hasattr(self, 'aggressive_mode') and self.aggressive_mode:
+                    rate = min(rate, 4)  # Will accept up to 4:1
+                
+                if c >= rate and rate <= 4:
+                    score = (10 - rate) * 10 + c
+                    if score > best_score:
+                        best_score = score
+                        best_give = r
+                        best_rate = rate
+            
+            if best_give is None:
+                break
+            
+            player.hand[best_give] -= best_rate
+            if player.hand[best_give] == 0:
+                del player.hand[best_give]
+            player.hand[want] += 1
+            game.log(f"{player.name} [AGGRESSIVE] trades {best_rate}:1 - gives {best_rate} {best_give} for 1 {want}")
+            game.snapshot(f"{player.name} aggressive trade")
+            
+            need = Counter({r:max(0, target_cost[r] - player.hand[r]) for r in target_cost})
+            if sum(need.values()) == 0:
+                return True
+        
+        return sum(need.values()) == 0
+
+# ============= END OF SUPER BOT =============
+
